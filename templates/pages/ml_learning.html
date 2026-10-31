@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AirBnBrrr — Model Learning</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: { sans: ['Inter', 'sans-serif'] },
+            colors: {
+              brand: { 50: '#f3fafb', 100: '#C1E6EC', 500: '#62B6DC', 600: '#1E6AA6', 700: '#185585', 800: '#4b6b80', 900: '#0b1d30' }
+            }
+          }
+        }
+      }
+    </script>
+    <style>
+      :root { --card:#ffffff; --ink:#0b1d30; --muted:#4b6b80; --line:#e2e8f0; --ball:98, 182, 220; --ok:#10b981; --bad:#ef4444; --ring:#0b1d30; }
+      .grid2 { display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:16px; }
+      .card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:14px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+      .card h2 { font-size:16px; margin:0 0 6px; display:flex; justify-content:space-between; align-items:baseline; }
+      canvas { width:100%; height:300px; display:block; }
+      .stats { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; margin-top:8px; text-align:center; }
+      .stats b { display:block; font-size:18px; font-variant-numeric:tabular-nums; }
+      .stats span { color:var(--muted); font-size:12px; }
+      .msg { min-height:22px; text-align:center; font-weight:600; margin-top:6px; }
+      .card button, .ctl button { background:#fff; color:var(--ink); border:1px solid var(--line); border-radius:10px; padding:8px 14px; font:inherit; font-size:14px; font-weight:600; cursor:pointer; }
+      .card button:hover, .ctl button:hover { border-color:#1E6AA6; }
+      .card button.bad { border-color:var(--bad); color:var(--bad); }
+      .badge { display:inline-block; font-size:12px; padding:2px 10px; border-radius:99px; border:1px solid var(--line); color:var(--muted); margin-left:8px; vertical-align:middle; font-weight:600; }
+      .legend i { display:inline-block; width:10px; height:10px; border-radius:50%; margin:0 4px 0 12px; vertical-align:middle; }
+      input[type=range] { accent-color:#1E6AA6; }
+    </style>
+</head>
+
+<body class="bg-brand-50 min-h-screen font-sans antialiased text-slate-800">
+
+  <!-- INCLUDE navigation.html -->
+
+  <div class="lg:pl-64 pt-16 lg:pt-0">
+    <main class="max-w-5xl mx-auto p-4 sm:p-8">
+      <h1 class="text-2xl font-bold tracking-tight text-brand-900">How each AC model learns <span class="badge" id="mode">loading…</span></h1>
+      <p class="text-sm text-brand-800 mt-1 mb-5">Each ball is one AC's memory of "normal". It grows as the model sees more readings, and the dashed ring is its alert line. The numbers underneath come from the real training of each AC; press Replay to watch it again.</p>
+
+      <div class="ctl flex flex-wrap gap-3 items-center mb-4">
+        <button id="play">Pause</button>
+        <button id="replay">Replay</button>
+        <input type="range" id="step" min="0" max="0" value="0" aria-label="Training progress" class="flex-1 min-w-[180px]">
+        <span id="stepLabel" class="text-sm text-slate-500 min-w-[110px] text-right"></span>
+      </div>
+
+      <div class="grid2" id="grid"></div>
+
+      <p class="legend text-sm text-slate-500 mt-5">
+        <i style="background:rgb(var(--ball))"></i>learned normal reading
+        <i style="background:var(--ok)"></i>new normal reading
+        <i style="background:var(--bad)"></i>flagged reading
+      </p>
+    </main>
+  </div>
+
+  <script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let units = [];          // [{name, points:[{rows, threshold, flag, pct}]}]
+let cards = [];
+let pos = 0;             // fractional stage index, animated
+let target = 0;
+let playing = true;
+let lastT = 0;
+
+// ---------- data: live from the backend, demo when the backend is not there
+async function loadLive() {
+  const list = await fetch("/api/ml/units").then((r) => r.json());
+  if (!Array.isArray(list) || !list.length) throw new Error("no trained units");
+  const out = [];
+  for (const u of list) {
+    const d = await fetch("/api/ml/learning?ac_unit=" + encodeURIComponent(u.ac_unit)).then((r) => r.json());
+    const pts = (d.points || []).map((p) => ({
+      rows: p.rows, threshold: p.threshold, flag: p.holdout_flag_rate, pct: (p.pct || 1) / 100,
+    }));
+    if (pts.length) out.push({ name: u.label || u.ac_unit, points: pts });
+  }
+  if (!out.length) throw new Error("no curves yet");
+  return out;
+}
+function demoData() {
+  const rnd = mulberry(7);
+  return ["AC1", "AC2"].map((name, k) => {
+    const pts = [];
+    for (let i = 0; i < 10; i++) {
+      const rows = Math.round(200 + (i / 9) * 5800);
+      const settle = Math.exp(-i / 3);
+      pts.push({
+        rows,
+        threshold: -0.525 + (rnd() - 0.5) * 0.04 * settle - k * 0.004,
+        flag: 0.01 + settle * (0.015 + rnd() * 0.02),
+        pct: 0.01,
+      });
+    }
+    return { name, points: pts };
+  });
+}
+function mulberry(a) { return function () { a |= 0; a = (a + 0x6D2B79F5) | 0;
+  let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+// ---------- one animated ball per unit
+function makeCard(unit, idx) {
+  const el = document.createElement("div");
+  el.className = "card";
+  el.innerHTML = `<h2><span>${unit.name}</span><span style="color:var(--muted);font-size:13px">memory ball</span></h2>
+    <canvas></canvas>
+    <div class="stats">
+      <div><b data-k="rows">0</b><span>readings learned</span></div>
+      <div><b data-k="thr">0</b><span>alert line</span></div>
+      <div><b data-k="fa">0%</b><span>false alarms</span></div>
+    </div>
+    <div class="msg"></div>
+    <div style="text-align:center;margin-top:8px"><button class="bad">Send a faulty reading</button> <button class="ok">Send a normal one</button></div>`;
+  $("grid").appendChild(el);
+  const canvas = el.querySelector("canvas");
+  const rnd = mulberry(100 + idx);
+  const maxRows = unit.points[unit.points.length - 1].rows;
+  const MAXDOTS = 420;
+  // fixed "sunflower" positions so dots stay put as the ball grows
+  const dots = Array.from({ length: MAXDOTS }, (_, i) => {
+    const r = Math.sqrt((i + 0.5) / MAXDOTS), a = i * 2.399963;
+    return { r: r * (0.92 + rnd() * 0.08), a, ph: rnd() * 6.28 };
+  });
+  const card = { unit, el, canvas, dots, maxRows, spawn: [], msg: el.querySelector(".msg"), msgT: 0,
+                 cur: { rows: 0, thr: 0, fa: 0 } };
+  el.querySelector("button.bad").onclick = () => spawn(card, true);
+  el.querySelector("button.ok").onclick = () => spawn(card, false);
+  return card;
+}
+function spawn(card, faulty) {
+  const a = Math.random() * 6.28;
+  card.spawn.push({ a, t: 0, faulty, d: faulty ? 1.55 : 0.0 });
+}
+function stageValues(unit, p) {
+  const pts = unit.points, i = Math.max(0, Math.min(pts.length - 1, Math.floor(p)));
+  const j = Math.min(pts.length - 1, i + 1), f = Math.max(0, Math.min(1, p - i));
+  const mix = (k) => pts[i][k] + (pts[j][k] - pts[i][k]) * f;
+  return { rows: mix("rows"), thr: mix("threshold"), fa: mix("flag"), pct: pts[i].pct };
+}
+function draw(card, time) {
+  const c = card.canvas, dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== Math.round(w * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+  const g = c.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  const cs = getComputedStyle(document.documentElement);
+  const ballRGB = cs.getPropertyValue("--ball").trim(), ok = cs.getPropertyValue("--ok").trim();
+  const bad = cs.getPropertyValue("--bad").trim(), ringC = cs.getPropertyValue("--ring").trim();
+
+  const v = stageValues(card.unit, pos);
+  card.cur = v;
+  const cx = w / 2, cy = h / 2, maxR = Math.min(w, h) / 2 - 36;
+  const R = 22 + (maxR - 22) * Math.sqrt(v.rows / card.maxRows);       // ball grows with data
+  // the ring wobbles while the false-alarm rate is still off target, then settles
+  const off = Math.min(1, Math.abs(v.fa - v.pct) / 0.03);
+  const ringR = R * 1.08;
+
+  const grad = g.createRadialGradient(cx, cy, R * 0.1, cx, cy, R * 1.05);
+  grad.addColorStop(0, `rgba(${ballRGB},0.30)`); grad.addColorStop(1, `rgba(${ballRGB},0.06)`);
+  g.fillStyle = grad; g.beginPath(); g.arc(cx, cy, R, 0, 6.2832); g.fill();
+
+  const n = Math.min(card.dots.length, Math.round(v.rows / 15));
+  g.fillStyle = `rgba(${ballRGB},0.85)`;
+  for (let i = 0; i < n; i++) {
+    const d = card.dots[i], wob = 1 + Math.sin(time / 700 + d.ph) * 0.015;
+    g.beginPath();
+    g.arc(cx + Math.cos(d.a) * d.r * R * wob, cy + Math.sin(d.a) * d.r * R * wob, 1.8, 0, 6.2832);
+    g.fill();
+  }
+
+  g.save(); g.strokeStyle = ringC; g.globalAlpha = 0.65; g.setLineDash([5, 5]); g.lineWidth = 1.5;
+  g.beginPath();
+  for (let s = 0; s <= 90; s++) {
+    const a = (s / 90) * 6.2832;
+    const rr = ringR * (1 + Math.sin(a * 5 + time / 350) * 0.05 * off);
+    const x = cx + Math.cos(a) * rr, y = cy + Math.sin(a) * rr;
+    s ? g.lineTo(x, y) : g.moveTo(x, y);
+  }
+  g.stroke(); g.restore();
+
+  // incoming readings
+  card.spawn = card.spawn.filter((p) => p.t < 1.6);
+  for (const p of card.spawn) {
+    p.t += 0.016;
+    const t = Math.min(1, p.t / 0.8), e = 1 - Math.pow(1 - t, 3);
+    const start = Math.min(w, h) / 2 - 6;
+    const dist = p.faulty ? start + (ringR + 14 - start) * e : start + (R * 0.4 - start) * e;
+    const x = cx + Math.cos(p.a) * dist, y = cy + Math.sin(p.a) * dist;
+    const col = p.faulty ? bad : ok;
+    g.fillStyle = col; g.beginPath(); g.arc(x, y, p.faulty ? 5 : 3.5, 0, 6.2832); g.fill();
+    if (p.faulty && t >= 1) {
+      g.strokeStyle = col; g.globalAlpha = Math.max(0, 1.6 - p.t); g.lineWidth = 2;
+      g.beginPath(); g.arc(x, y, 6 + (p.t - 0.8) * 18, 0, 6.2832); g.stroke(); g.globalAlpha = 1;
+      if (!p.flagged) { p.flagged = true; card.msg.textContent = "ALERT: outside this unit's normal"; card.msg.style.color = bad; card.msgT = 2.5; }
+    }
+    if (!p.faulty && t >= 1 && !p.flagged) { p.flagged = true; card.msg.textContent = "Normal: absorbed into memory"; card.msg.style.color = ok; card.msgT = 2.5; }
+  }
+  if (card.msgT > 0) { card.msgT -= 0.016; if (card.msgT <= 0) card.msg.textContent = ""; }
+
+  card.el.querySelector('[data-k="rows"]').textContent = Math.round(v.rows).toLocaleString();
+  card.el.querySelector('[data-k="thr"]').textContent = v.thr.toFixed(3);
+  card.el.querySelector('[data-k="fa"]').textContent = (v.fa * 100).toFixed(1) + "%";
+}
+
+// ---------- loop + controls
+function frame(t) {
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0); lastT = t;
+  const last = units[0].points.length - 1;
+  if (playing) {
+    target = Math.min(last, target + dt * 0.9);                       // ~1.1 s per stage
+    if (target >= last) { playing = false; $("play").textContent = "Play"; }
+    $("step").value = target;
+  }
+  pos += (target - pos) * Math.min(1, dt * 6);
+  cards.forEach((c) => draw(c, t));
+  const rows = Math.round(cards.length ? cards[0].cur.rows : 0);
+  $("stepLabel").textContent = rows.toLocaleString() + " rows";
+  requestAnimationFrame(frame);
+}
+$("play").onclick = () => {
+  const last = units[0].points.length - 1;
+  if (!playing && target >= last) { target = 0; pos = 0; }
+  playing = !playing; $("play").textContent = playing ? "Pause" : "Play";
+};
+$("replay").onclick = () => { target = 0; pos = 0; playing = true; $("play").textContent = "Pause"; };
+$("step").oninput = (e) => { playing = false; $("play").textContent = "Play"; target = parseFloat(e.target.value); };
+
+(async function init() {
+  try { units = await loadLive(); $("mode").textContent = "live data"; }
+  catch (e) { units = demoData(); $("mode").textContent = "demo data"; }
+  const len = Math.min(...units.map((u) => u.points.length));
+  units.forEach((u) => { u.points = u.points.slice(0, len); });
+  $("step").max = len - 1;
+  cards = units.map(makeCard);
+  requestAnimationFrame(frame);
+})();
+  </script>
+</body>
+
+</html>
